@@ -21,7 +21,7 @@ Implementation highlights:
   - A subset of environments does not reset immediately after termination
   - These environments receive a recovery window and reset states sampled from recovery clips
 - Unified AMP training:
-  - One actor-critic + AMP discriminator
+  - One actor-critic + One AMP discriminator
   - Velocity tracking, perturbation robustness, and recovery are learned together
 
 This reduces discontinuities caused by policy switching and yields more consistent behavior.
@@ -78,6 +78,13 @@ Logs are saved by default to:
 
 - `logs/rsl_rl/g1_amp_locomotion/<time_stamp_run>/`
 
+## Training Curve Note (Important)
+
+- Around `2w` iterations (about 20k), the policy often suddenly learns fall-recovery behavior.
+- As a result, multiple metrics in `logs` may show abrupt jumps. This is expected and not necessarily a training failure.
+
+![Training log transition example](logs.png)
+
 ## Evaluation and Visualization
 
 Replay with a trained checkpoint:
@@ -120,3 +127,8 @@ If valid NPZ files exist in these folders, training config loads them automatica
 - AMP + velocity objective jointly optimize style and task performance
 - Delayed reset with recovery sampling explicitly improves recovery ability
 - End-to-end pipeline supports ONNX export for deployment
+
+## Acknowledgements
+
+- Thanks to [unitreerobotics/unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab) for open-sourcing their work and inspiration.
+- Thanks to [Open-X-Humanoid/TienKung-Lab](https://github.com/Open-X-Humanoid/TienKung-Lab); the rsl_rl AMP part in this project references their implementation.

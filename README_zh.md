@@ -21,7 +21,7 @@
 	- 一部分环境在触发终止后不立即 reset，而是给定恢复窗口
 	- 该子集环境优先从 Recovery 片段采样 reset 状态
 - 统一 AMP 训练：
-	- 单一 actor-critic + AMP discriminator
+	- 单一 actor-critic + 单一 AMP discriminator
 	- 在同一训练过程中学习速度跟踪、抗扰动与恢复能力
 
 这样可以减少策略切换带来的状态不连续问题，得到更一致的行为。
@@ -80,6 +80,13 @@ python scripts/train.py Unitree-G1-AMP-Flat
 
 - `logs/rsl_rl/g1_amp_locomotion/<time_stamp_run>/`
 
+## 训练曲线说明（重要）
+
+- 在约 `2w` 轮（约 20k iterations）附近，策略通常会突然学会“跌倒后恢复”行为。
+- 对应地，`logs` 中多个指标会出现明显突变（阶跃式变化），这是正常现象，不一定是训练异常。
+
+![训练日志突变示例](logs.png)
+
 ## 评估与可视化
 
 使用已训练权重回放：
@@ -122,3 +129,8 @@ python scripts/csv_to_npz.py --help
 - AMP + 速度任务联合优化，兼顾风格与任务性能
 - 延迟重置与 recovery 采样机制，显式强化恢复能力
 - 训练到部署链路完整，支持 ONNX 导出
+
+## 致谢
+
+- 感谢 [unitreerobotics/unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab) 项目的开源工作与启发。
+- 感谢 [Open-X-Humanoid/TienKung-Lab](https://github.com/Open-X-Humanoid/TienKung-Lab)，本项目在 rsl_rl 的 AMP 部分参考了该实现。
