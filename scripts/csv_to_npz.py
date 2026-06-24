@@ -42,9 +42,10 @@ from tqdm import tqdm
 
 import mjlab
 from mjlab.entity import Entity
-from mjlab.scene import Scene
+from mjlab.scene import Scene, SceneCfg
 from mjlab.sim.sim import Simulation, SimulationCfg
 from mjlab.tasks.tracking.config.g1.env_cfgs import unitree_g1_flat_tracking_env_cfg
+from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.lab_api.math import (
   axis_angle_from_quat,
   quat_conjugate,
@@ -53,6 +54,57 @@ from mjlab.utils.lab_api.math import (
 )
 from mjlab.viewer.offscreen_renderer import OffscreenRenderer
 from mjlab.viewer.viewer_config import ViewerConfig
+
+from src.assets.robots import Z01_JOINT_NAMES, get_z01_robot_cfg
+
+G1_JOINT_NAMES = [
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_hip_yaw_joint",
+  "left_knee_joint",
+  "left_ankle_pitch_joint",
+  "left_ankle_roll_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_hip_yaw_joint",
+  "right_knee_joint",
+  "right_ankle_pitch_joint",
+  "right_ankle_roll_joint",
+  "waist_yaw_joint",
+  "waist_roll_joint",
+  "waist_pitch_joint",
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "left_wrist_roll_joint",
+  "left_wrist_pitch_joint",
+  "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "right_wrist_roll_joint",
+  "right_wrist_pitch_joint",
+  "right_wrist_yaw_joint",
+]
+
+
+def _z01_flat_scene_cfg() -> SceneCfg:
+  return SceneCfg(
+    terrain=TerrainEntityCfg(terrain_type="plane"),
+    entities={"robot": get_z01_robot_cfg()},
+    num_envs=1,
+    extent=2.0,
+  )
+
+
+def _get_robot_scene_and_joints(robot: Literal["g1", "z01"]) -> tuple[SceneCfg, list[str]]:
+  if robot == "g1":
+    return unitree_g1_flat_tracking_env_cfg().scene, G1_JOINT_NAMES
+  if robot == "z01":
+    return _z01_flat_scene_cfg(), list(Z01_JOINT_NAMES)
+  raise ValueError(f"Unsupported robot: {robot}")
 
 
 class MotionLoader:
@@ -402,6 +454,7 @@ def main(
   input_fps: float = 30.0,
   output_fps: float = 50.0,
   device: str = "cuda:0",
+  robot: Literal["g1", "z01"] = "g1",
   render: bool = False,
   render_backend: Literal["offscreen", "window"] = "offscreen",
   window_realtime: bool = False,
@@ -420,6 +473,7 @@ def main(
     input_fps: Frame rate of the CSV file.
     output_fps: Desired output frame rate.
     device: Device to use.
+    robot: Robot model to use for replay (g1 or z01).
     render: Whether to render the simulation.
     render_backend: Rendering backend (offscreen or window).
     window_realtime: Keep window playback aligned with wall-clock time.
@@ -445,7 +499,8 @@ def main(
   sim_cfg = SimulationCfg()
   sim_cfg.mujoco.timestep = 1.0 / output_fps
 
-  scene = Scene(unitree_g1_flat_tracking_env_cfg().scene, device=device)
+  scene_cfg, joint_names = _get_robot_scene_and_joints(robot)
+  scene = Scene(scene_cfg, device=device)
   model = scene.compile()
 
   sim = Simulation(num_envs=1, cfg=sim_cfg, model=model, device=device)
@@ -476,38 +531,6 @@ def main(
       scene=scene,
     )
     renderer.initialize()
-
-  joint_names = [
-    "left_hip_pitch_joint",
-    "left_hip_roll_joint",
-    "left_hip_yaw_joint",
-    "left_knee_joint",
-    "left_ankle_pitch_joint",
-    "left_ankle_roll_joint",
-    "right_hip_pitch_joint",
-    "right_hip_roll_joint",
-    "right_hip_yaw_joint",
-    "right_knee_joint",
-    "right_ankle_pitch_joint",
-    "right_ankle_roll_joint",
-    "waist_yaw_joint",
-    "waist_roll_joint",
-    "waist_pitch_joint",
-    "left_shoulder_pitch_joint",
-    "left_shoulder_roll_joint",
-    "left_shoulder_yaw_joint",
-    "left_elbow_joint",
-    "left_wrist_roll_joint",
-    "left_wrist_pitch_joint",
-    "left_wrist_yaw_joint",
-    "right_shoulder_pitch_joint",
-    "right_shoulder_roll_joint",
-    "right_shoulder_yaw_joint",
-    "right_elbow_joint",
-    "right_wrist_roll_joint",
-    "right_wrist_pitch_joint",
-    "right_wrist_yaw_joint",
-  ]
 
   for i, (cur_input_file, cur_output_name) in enumerate(file_pairs):
     if len(file_pairs) > 1:
