@@ -35,13 +35,21 @@ class MotionResetManager:
     # Initialization
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _motion_cache_key(motion_dir: str, min_root_height: float | None) -> str:
+        if min_root_height is None:
+            return motion_dir
+        return f"{motion_dir}@h>={min_root_height:.3f}"
+
     def init(
         self,
         env: ManagerBasedRlEnv,
         motion_dir: str,
         recovery_dir: str | None = None,
+        min_root_height: float | None = None,
     ) -> None:
-        if motion_dir in self.walk_run_frames:
+        cache_key = self._motion_cache_key(motion_dir, min_root_height)
+        if cache_key in self.walk_run_frames:
             return
 
         loader = MotionLoader(
@@ -53,14 +61,25 @@ class MotionResetManager:
             recovery_dir=recovery_dir,
         )
 
-        self.walk_run_frames[motion_dir] = self._concat_frames(loader.motion_data)
-        motion_count = self.walk_run_frames[motion_dir]["root_pos"].shape[0]
-        print(f"[MotionResetManager] Loaded {len(loader.motion_data)} clips, {motion_count} frames from {motion_dir}")
+        walk_run_frames = self._concat_frames(loader.motion_data)
+        walk_run_frames, kept, total = self._filter_frames_by_height(walk_run_frames, min_root_height)
+        self.walk_run_frames[cache_key] = walk_run_frames
+        print(
+            f"[MotionResetManager] Loaded {len(loader.motion_data)} clips, "
+            f"{kept}/{total} frames from {motion_dir}"
+            + (f" (min_root_height={min_root_height:.3f}m)" if min_root_height is not None else "")
+        )
 
         if loader.motion_data_recovery:
-            self.recovery_frames[motion_dir] = self._concat_frames(loader.motion_data_recovery)
-            recovery_count = self.recovery_frames[motion_dir]["root_pos"].shape[0]
-            print(f"[MotionResetManager] Loaded {len(loader.motion_data_recovery)} recovery clips, {recovery_count} frames from {recovery_dir}")
+            recovery_frames = self._concat_frames(loader.motion_data_recovery)
+            recovery_frames, recovery_kept, recovery_total = self._filter_frames_by_height(
+                recovery_frames, min_root_height
+            )
+            self.recovery_frames[cache_key] = recovery_frames
+            print(
+                f"[MotionResetManager] Loaded {len(loader.motion_data_recovery)} recovery clips, "
+                f"{recovery_kept}/{recovery_total} frames from {recovery_dir}"
+            )
 
     # ------------------------------------------------------------------
     # Reset
@@ -72,7 +91,9 @@ class MotionResetManager:
         env_ids: torch.Tensor | None,
         motion_dir: str,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+        min_root_height: float | None = None,
     ) -> None:
+        cache_key = self._motion_cache_key(motion_dir, min_root_height)
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
 
@@ -91,12 +112,12 @@ class MotionResetManager:
 
         # Reset normal envs with walk/run data.
         if len(normal_ids) > 0:
-            self._write_reset_state(env, normal_ids, self.walk_run_frames[motion_dir], asset_cfg)
+            self._write_reset_state(env, normal_ids, self.walk_run_frames[cache_key], asset_cfg)
 
         # Reset delay envs with recovery data (fallback to walk/run if unavailable).
         if len(delay_ids) > 0:
-            recovery = self.recovery_frames.get(motion_dir)
-            frames = recovery if recovery is not None else self.walk_run_frames[motion_dir]
+            recovery = self.recovery_frames.get(cache_key)
+            frames = recovery if recovery is not None else self.walk_run_frames[cache_key]
             self._write_reset_state(env, delay_ids, frames, asset_cfg)
 
     def _get_delay_env_mask(self, env: ManagerBasedRlEnv) -> torch.Tensor | None:
@@ -159,6 +180,24 @@ class MotionResetManager:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _filter_frames_by_height(
+        frames: dict[str, torch.Tensor],
+        min_root_height: float | None,
+    ) -> tuple[dict[str, torch.Tensor], int, int]:
+        total = frames["root_pos"].shape[0]
+        if min_root_height is None:
+            return frames, total, total
+
+        keep = frames["root_pos"][:, 2] >= min_root_height
+        kept = int(keep.sum().item())
+        if kept == 0:
+            raise ValueError(
+                f"No motion frames with root height >= {min_root_height:.3f}m "
+                f"(total frames: {total})"
+            )
+        return {key: value[keep] for key, value in frames.items()}, kept, total
+
+    @staticmethod
     def _concat_frames(motions: list[dict]) -> dict[str, torch.Tensor]:
         root_pos_list = []
         root_quat_list = []
@@ -194,12 +233,14 @@ def init_motion_loader(
     recovery_dir: str | None = None,
     delay_reset_env_ratio: float = 0.0,
     max_delay_steps: int = 0,
+    min_root_height: float | None = None,
 ) -> None:
     """Startup event: load motion data and optionally install delayed termination."""
     MotionResetManager.get().init(
         env=env,
         motion_dir=motion_dir,
         recovery_dir=recovery_dir,
+        min_root_height=min_root_height,
     )
 
     # Install DelayedTerminationManager if requested.
@@ -224,6 +265,7 @@ def reset_from_motion_data(
     env_ids: torch.Tensor | None,
     motion_dir: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    min_root_height: float | None = None,
 ) -> None:
     """Reset event: reset envs from random motion frames, with delay support."""
     MotionResetManager.get().reset(
@@ -231,4 +273,5 @@ def reset_from_motion_data(
         env_ids=env_ids,
         motion_dir=motion_dir,
         asset_cfg=asset_cfg,
+        min_root_height=min_root_height,
     )

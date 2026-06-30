@@ -4,6 +4,7 @@ import os
 
 from src.assets.robots import (
   Z01_ACTION_SCALE,
+  Z01_JOINT_NAMES,
   get_z01_robot_cfg,
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -11,14 +12,73 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from src.tasks.amp_loco.amp_env_cfg import make_amp_env_cfg
 
+# Locomotion joints only — head is held at default by PD, not controlled by policy.
+Z01_LOCOMOTION_JOINT_NAMES: tuple[str, ...] = tuple(
+  name for name in Z01_JOINT_NAMES if not name.startswith("head_")
+)
+Z01_LOCOMOTION_ACTION_SCALE: dict[str, float] = {
+  name: Z01_ACTION_SCALE[name] for name in Z01_LOCOMOTION_JOINT_NAMES
+}
 
-def z01_amp_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+
+def _resolve_z01_motion_dirs() -> tuple[str, str | None]:
+  """Resolve WalkandRun / Recovery dirs; recovery is optional."""
+  _motion_base = os.path.abspath(
+    os.path.join(
+      os.path.dirname(__file__), "..", "..", "..", "..", "assets", "motions", "Z01", "amp"
+    )
+  )
+  motion_dir = os.path.join(_motion_base, "WalkandRun")
+  recovery_dir = os.path.join(_motion_base, "Recovery")
+  if not os.path.isdir(motion_dir):
+    motion_dir = _motion_base
+  if not os.path.isdir(recovery_dir):
+    recovery_dir = None
+  return motion_dir, recovery_dir
+
+
+def _apply_z01_stability_overrides(
+  cfg: ManagerBasedRlEnvCfg,
+  *,
+  warmup: bool = False,
+) -> None:
+  """Apply Z01-specific stability tweaks."""
+  if warmup:
+    cfg.events.pop("push_robot", None)
+    # Warmup: no delayed reset — avoids explosive height-recovery reward hacking.
+    cfg.events["init_motion_loader"].params["delay_reset_env_ratio"] = 0.0
+    cfg.events["init_motion_loader"].params["max_delay_steps"] = 0
+    # Only sample standing/walking frames (exclude fallen poses from mocap).
+    cfg.events["init_motion_loader"].params["min_root_height"] = 0.75
+    cfg.events["reset_from_motion"].params["min_root_height"] = 0.75
+    cfg.rewards["is_terminated"].weight = -50.0
+    cfg.rewards["self_collisions"].weight = -0.15
+    cfg.rewards["action_rate_l2"].weight = -0.05
+    cfg.rewards["joint_pos_limits"].weight = -5.0
+    cfg.rewards["track_root_height"].params["delay_env_rew_ratio"] = 0.0
+    cfg.terminations["bad_base_height"].params["minimum_height"] = 0.65
+
+    twist_cmd = cfg.commands["twist"]
+    assert isinstance(twist_cmd, UniformVelocityCommandCfg)
+    twist_cmd.debug_vis = False
+    twist_cmd.ranges.lin_vel_x = (0.0, 1.0)
+    twist_cmd.ranges.lin_vel_y = (-0.3, 0.3)
+    twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
+  else:
+    cfg.events["init_motion_loader"].params["delay_reset_env_ratio"] = 0.2
+    cfg.events["init_motion_loader"].params["max_delay_steps"] = 150
+    cfg.rewards["self_collisions"].weight = -0.2
+    cfg.terminations["bad_base_height"].params["minimum_height"] = 0.68
+
+
+def z01_amp_rough_env_cfg(play: bool = False, warmup: bool = False) -> ManagerBasedRlEnvCfg:
   """Create Z01 rough terrain velocity configuration."""
   cfg = make_amp_env_cfg()
 
@@ -87,7 +147,13 @@ def z01_amp_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
-  joint_pos_action.scale = Z01_ACTION_SCALE
+  joint_pos_action.actuator_names = Z01_LOCOMOTION_JOINT_NAMES
+  joint_pos_action.scale = Z01_LOCOMOTION_ACTION_SCALE
+
+  locomotion_joint_cfg = SceneEntityCfg("robot", joint_names=Z01_LOCOMOTION_JOINT_NAMES)
+  for group in ("actor", "critic"):
+    cfg.observations[group].terms["joint_pos"].params = {"asset_cfg": locomotion_joint_cfg}
+    cfg.observations[group].terms["joint_vel"].params = {"asset_cfg": locomotion_joint_cfg}
 
   cfg.viewer.body_name = anchor_name
 
@@ -103,18 +169,13 @@ def z01_amp_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = (anchor_name,)
 
-  cfg.events["init_motion_loader"].params["delay_reset_env_ratio"] = 0.4
-  cfg.events["init_motion_loader"].params["max_delay_steps"] = 250
-
-  _motion_base = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "..", "assets", "motions", "Z01", "amp"
+  motion_dir, recovery_dir = _resolve_z01_motion_dirs()
+  cfg.events["init_motion_loader"].params["motion_dir"] = motion_dir
+  cfg.events["init_motion_loader"].params["recovery_dir"] = recovery_dir
+  cfg.events["reset_from_motion"].params["motion_dir"] = motion_dir
+  cfg.events["reset_from_motion"].params["asset_cfg"] = SceneEntityCfg(
+    "robot", joint_names=Z01_LOCOMOTION_JOINT_NAMES
   )
-  _motion_dir = os.path.abspath(os.path.join(_motion_base, "WalkandRun"))
-  _recovery_dir = os.path.abspath(os.path.join(_motion_base, "Recovery"))
-
-  cfg.events["init_motion_loader"].params["motion_dir"] = _motion_dir
-  cfg.events["init_motion_loader"].params["recovery_dir"] = _recovery_dir
-  cfg.events["reset_from_motion"].params["motion_dir"] = _motion_dir
 
   cfg.rewards["track_anchor_linear_velocity"].params["anchor_cfg"].body_names = (anchor_name,)
   cfg.rewards["track_anchor_angular_velocity"].params["anchor_cfg"].body_names = (anchor_name,)
@@ -159,6 +220,8 @@ def z01_amp_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     params={"minimum_height": 0.72},
   )
 
+  _apply_z01_stability_overrides(cfg, warmup=warmup)
+
   if play:
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
@@ -174,9 +237,9 @@ def z01_amp_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   return cfg
 
 
-def z01_amp_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def z01_amp_flat_env_cfg(play: bool = False, warmup: bool = False) -> ManagerBasedRlEnvCfg:
   """Create Z01 flat terrain velocity configuration."""
-  cfg = z01_amp_rough_env_cfg(play=play)
+  cfg = z01_amp_rough_env_cfg(play=play, warmup=warmup)
 
   cfg.sim.njmax = 640
   cfg.sim.mujoco.ccd_iterations = 50
@@ -200,3 +263,8 @@ def z01_amp_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd.ranges.ang_vel_z = (-1.57, 1.57)
 
   return cfg
+
+
+def z01_amp_flat_warmup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """Flat terrain with conservative warmup overrides (phase 1)."""
+  return z01_amp_flat_env_cfg(play=play, warmup=True)

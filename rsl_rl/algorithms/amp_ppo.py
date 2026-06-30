@@ -44,6 +44,7 @@ class AMPPPO:
         amp_normalizer,
         amp_replay_buffer_size=100000,
         min_std=None,
+        max_std=None,
         num_learning_epochs=1,
         num_mini_batches=1,
         clip_param=0.2,
@@ -113,6 +114,7 @@ class AMPPPO:
         # Discriminator components
         self.amploss_coef = 1.0
         self.min_std = min_std
+        self.max_std = max_std
         self.discriminator = discriminator
         self.discriminator.to(self.device)
         self.amp_transition = RolloutStorage.Transition()
@@ -187,6 +189,8 @@ class AMPPPO:
     def process_env_step(self, rewards, dones, infos, amp_obs):
         # Record the rewards and dones
         # Note: we clone here because later on we bootstrap the rewards based on timeouts
+        rewards = torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0)
+        rewards = rewards.clamp(-100.0, 100.0)
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
 
@@ -467,29 +471,52 @@ class AMPPPO:
             nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
-            # Keep policy noise above configured floor to avoid invalid Normal std.
-            if self.min_std is not None and hasattr(self.policy, "noise_std_type"):
+            # Keep policy noise within configured bounds to avoid invalid Normal std.
+            if (self.min_std is not None or self.max_std is not None) and hasattr(self.policy, "noise_std_type"):
                 with torch.no_grad():
-                    min_std = torch.as_tensor(self.min_std, device=self.device, dtype=torch.float32)
-                    if min_std.ndim == 0:
-                        min_std = min_std.unsqueeze(0)
+                    min_std = None
+                    max_std = None
+                    if self.min_std is not None:
+                        min_std = torch.as_tensor(self.min_std, device=self.device, dtype=torch.float32)
+                        if min_std.ndim == 0:
+                            min_std = min_std.unsqueeze(0)
+                    if self.max_std is not None:
+                        max_std = torch.as_tensor(self.max_std, device=self.device, dtype=torch.float32)
+                        if max_std.ndim == 0:
+                            max_std = max_std.unsqueeze(0)
 
                     if getattr(self.policy, "noise_std_type") == "scalar" and hasattr(self.policy, "std"):
                         target_std = self.policy.std
-                        if min_std.numel() == 1:
-                            min_std = min_std.expand_as(target_std)
-                        elif min_std.numel() != target_std.numel():
-                            fallback = torch.clamp_min(min_std.min(), 1.0e-6)
-                            min_std = fallback.expand_as(target_std)
-                        target_std.clamp_(min=min_std)
+                        if min_std is not None:
+                            if min_std.numel() == 1:
+                                min_std = min_std.expand_as(target_std)
+                            elif min_std.numel() != target_std.numel():
+                                fallback = torch.clamp_min(min_std.min(), 1.0e-6)
+                                min_std = fallback.expand_as(target_std)
+                            target_std.clamp_(min=min_std)
+                        if max_std is not None:
+                            if max_std.numel() == 1:
+                                max_std = max_std.expand_as(target_std)
+                            elif max_std.numel() != target_std.numel():
+                                fallback = max_std.max()
+                                max_std = fallback.expand_as(target_std)
+                            target_std.clamp_(max=max_std)
                     elif getattr(self.policy, "noise_std_type") == "log" and hasattr(self.policy, "log_std"):
                         target_log_std = self.policy.log_std
-                        if min_std.numel() == 1:
-                            min_std = min_std.expand_as(target_log_std)
-                        elif min_std.numel() != target_log_std.numel():
-                            fallback = torch.clamp_min(min_std.min(), 1.0e-6)
-                            min_std = fallback.expand_as(target_log_std)
-                        target_log_std.clamp_(min=torch.log(torch.clamp_min(min_std, 1.0e-6)))
+                        if min_std is not None:
+                            if min_std.numel() == 1:
+                                min_std = min_std.expand_as(target_log_std)
+                            elif min_std.numel() != target_log_std.numel():
+                                fallback = torch.clamp_min(min_std.min(), 1.0e-6)
+                                min_std = fallback.expand_as(target_log_std)
+                            target_log_std.clamp_(min=torch.log(torch.clamp_min(min_std, 1.0e-6)))
+                        if max_std is not None:
+                            if max_std.numel() == 1:
+                                max_std = max_std.expand_as(target_log_std)
+                            elif max_std.numel() != target_log_std.numel():
+                                fallback = max_std.max()
+                                max_std = fallback.expand_as(target_log_std)
+                            target_log_std.clamp_(max=torch.log(torch.clamp_min(max_std, 1.0e-6)))
             # -- For RND
             if self.rnd_optimizer:
                 self.rnd_optimizer.step()

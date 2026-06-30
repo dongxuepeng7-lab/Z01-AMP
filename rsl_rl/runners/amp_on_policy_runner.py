@@ -39,6 +39,21 @@ from rsl_rl.modules import (
 from rsl_rl.utils import AMPLoader, Normalizer, store_code_state
 
 
+def _expand_std_values(values: list[float], num_actions: int, name: str) -> list[float]:
+    if len(values) == 0:
+        return [0.0] * num_actions
+    if len(values) == 1:
+        return values * num_actions
+    if len(values) < num_actions:
+        pad_value = values[-1]
+        print(f"[AMPPPO] {name} has {len(values)} values, padded to {num_actions} with {pad_value}.")
+        return values + [pad_value] * (num_actions - len(values))
+    if len(values) > num_actions:
+        print(f"[AMPPPO] {name} has {len(values)} values, truncated to {num_actions}.")
+        return values[:num_actions]
+    return values
+
+
 def _migrate_train_cfg(train_cfg: dict) -> None:
     """Convert mjlab v5 actor/critic config format to legacy policy format."""
     if "policy" not in train_cfg and "actor" in train_cfg:
@@ -179,28 +194,23 @@ class AmpOnPolicyRunner:
             device,
             train_cfg["amp_task_reward_lerp"],
         ).to(self.device)
-        min_std_values = list(train_cfg["min_normalized_std"])
-        num_actions = self.env.num_actions
-        if len(min_std_values) == 0:
-            min_std_values = [0.0] * num_actions
-            print(f"[AMPPPO] Empty min_normalized_std. Falling back to {num_actions} zeros.")
-        elif len(min_std_values) == 1:
-            min_std_values = min_std_values * num_actions
-        elif len(min_std_values) < num_actions:
-            pad_value = min_std_values[-1]
-            min_std_values = min_std_values + [pad_value] * (num_actions - len(min_std_values))
-            print(
-                f"[AMPPPO] min_normalized_std has {len(train_cfg['min_normalized_std'])} values, "
-                f"padded to {num_actions} with {pad_value}."
-            )
-        elif len(min_std_values) > num_actions:
-            min_std_values = min_std_values[:num_actions]
-            print(
-                f"[AMPPPO] min_normalized_std has {len(train_cfg['min_normalized_std'])} values, "
-                f"truncated to {num_actions}."
-            )
+        min_std_values = _expand_std_values(
+            list(train_cfg["min_normalized_std"]),
+            num_actions=self.env.num_actions,
+            name="min_normalized_std",
+        )
+        max_std_values = _expand_std_values(
+            list(train_cfg.get("max_normalized_std", [])),
+            num_actions=self.env.num_actions,
+            name="max_normalized_std",
+        )
 
         min_std = torch.tensor(min_std_values, device=self.device, requires_grad=False)
+        max_std = (
+            torch.tensor(max_std_values, device=self.device, requires_grad=False)
+            if len(train_cfg.get("max_normalized_std", [])) > 0
+            else None
+        )
 
         # initialize algorithm
         alg_class = eval(self.alg_cfg.pop("class_name"))
@@ -211,6 +221,7 @@ class AmpOnPolicyRunner:
             amp_normalizer,
             device=self.device,
             min_std=min_std,
+            max_std=max_std,
             **self.alg_cfg,
             multi_gpu_cfg=self.multi_gpu_cfg,
         )
@@ -349,6 +360,8 @@ class AmpOnPolicyRunner:
                     if len(reset_env_ids) > 0:
                         next_amp_obs_with_term[reset_env_ids] = amp_obs[reset_env_ids]
 
+                    rewards = torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0)
+                    rewards = rewards.clamp(-100.0, 100.0)
                     rewards = self.alg.discriminator.predict_amp_reward(
                         amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer
                     )[0]
